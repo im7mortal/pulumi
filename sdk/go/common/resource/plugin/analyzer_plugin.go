@@ -85,6 +85,7 @@ func NewAnalyzer(host Host, ctx *Context, name tokens.QName) (Analyzer, error) {
 }
 
 // NewPolicyAnalyzer boots the nodejs analyzer plugin located at `policyPackpath`
+// That function doesn't called on pulumi but instead on policy program
 func NewPolicyAnalyzer(
 	host Host, ctx *Context, name tokens.QName, policyPackPath string, opts *PolicyAnalyzerOptions,
 ) (Analyzer, error) {
@@ -136,6 +137,52 @@ func NewPolicyAnalyzer(
 	}
 
 	plug, err := newPlugin(ctx, pwd, pluginPath, fmt.Sprintf("%v (analyzer)", name),
+		apitype.AnalyzerPlugin, args, env, analyzerPluginDialOptions(ctx, fmt.Sprintf("%v", name)))
+	if err != nil {
+		// The original error might have been wrapped before being returned from newPlugin. So we look for
+		// the root cause of the error. This won't work if we switch to Go 1.13's new approach to wrapping.
+		if errors.Cause(err) == errRunPolicyModuleNotFound {
+			return nil, fmt.Errorf("it looks like the policy pack's dependencies are not installed; "+
+				"try running npm install or yarn install in %q", policyPackPath)
+		}
+		if errors.Cause(err) == errPluginNotFound {
+			return nil, fmt.Errorf("policy pack not found at %q", name)
+		}
+		return nil, errors.Wrapf(err, "policy pack %q failed to start", string(name))
+	}
+	contract.Assertf(plug != nil, "unexpected nil analyzer plugin for %s", name)
+
+	return &analyzer{
+		ctx:     ctx,
+		name:    name,
+		plug:    plug,
+		client:  pulumirpc.NewAnalyzerClient(plug.Conn),
+		version: proj.Version,
+	}, nil
+}
+
+// NewPolicyAnalyzer boots the analyzer for policies runtimes which compile
+func NewPolicyAnalyzerWithExe(
+	hostServerAddr string, ctx *Context, name tokens.QName, policyPackPath, policyProgramPath string, opts *PolicyAnalyzerOptions,
+) (Analyzer, error) {
+	projPath := filepath.Join(policyPackPath, "PulumiPolicy.yaml")
+	proj, err := workspace.LoadPolicyPack(projPath)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to load Pulumi policy project located at %q", policyPackPath)
+	}
+	// Create the environment variables from the options.
+	env, err := constructEnv(opts, proj.Runtime.Name())
+	if err != nil {
+		return nil, err
+	}
+
+	args := []string{hostServerAddr, "."}
+	for k, v := range proj.Runtime.Options() {
+		if vstr := fmt.Sprintf("%v", v); vstr != "" {
+			args = append(args, fmt.Sprintf("-%s=%s", k, vstr))
+		}
+	}
+	plug, err := newPlugin(ctx, policyPackPath, policyProgramPath, fmt.Sprintf("%v (analyzer)", name),
 		apitype.AnalyzerPlugin, args, env, analyzerPluginDialOptions(ctx, fmt.Sprintf("%v", name)))
 	if err != nil {
 		// The original error might have been wrapped before being returned from newPlugin. So we look for
@@ -533,6 +580,38 @@ func marshalResourceOptions(opts AnalyzerResourceOptions) *pulumirpc.AnalyzerRes
 	return result
 }
 
+func unmarshalResourceOptions(protoOptions *pulumirpc.AnalyzerResourceOptions) (AnalyzerResourceOptions, error) {
+	var deleteBeforeReplace *bool
+	if protoOptions.GetDeleteBeforeReplaceDefined() {
+		deleteBeforeReplace = new(bool)
+		*deleteBeforeReplace = protoOptions.GetDeleteBeforeReplace()
+	}
+
+	opts := AnalyzerResourceOptions{
+		Protect:             protoOptions.GetProtect(),
+		IgnoreChanges:       protoOptions.GetIgnoreChanges(),
+		DeleteBeforeReplace: deleteBeforeReplace,
+		CustomTimeouts: resource.CustomTimeouts{
+			Create: protoOptions.GetCustomTimeouts().GetCreate(),
+			Update: protoOptions.GetCustomTimeouts().GetUpdate(),
+			Delete: protoOptions.GetCustomTimeouts().GetDelete(),
+		},
+	}
+
+	var err error
+
+	opts.Aliases, err = revertAliases(protoOptions.GetAliases())
+	if err != nil {
+		return AnalyzerResourceOptions{}, err
+	}
+
+	for _, sec := range protoOptions.GetAdditionalSecretOutputs() {
+		opts.AdditionalSecretOutputs = append(opts.AdditionalSecretOutputs, resource.PropertyKey(sec))
+	}
+
+	return opts, nil
+}
+
 func marshalProvider(provider *AnalyzerProviderResource) (*pulumirpc.AnalyzerProviderResource, error) {
 	if provider == nil {
 		return nil, nil
@@ -548,6 +627,24 @@ func marshalProvider(provider *AnalyzerProviderResource) (*pulumirpc.AnalyzerPro
 		Urn:        string(provider.URN),
 		Type:       string(provider.Type),
 		Name:       provider.Name,
+		Properties: props,
+	}, nil
+}
+
+func unmarshalProvider(protoProvider *pulumirpc.AnalyzerProviderResource) (*AnalyzerProviderResource, error) {
+	if protoProvider == nil {
+		return nil, nil
+	}
+	// Unmarshal properties
+	props, err := UnmarshalProperties(protoProvider.Properties, MarshalOptions{KeepUnknowns: true, KeepSecrets: true, SkipInternalKeys: true})
+	if err != nil {
+		return nil, errors.Wrap(err, "unmarshalling properties")
+	}
+
+	return &AnalyzerProviderResource{
+		URN:        resource.URN(protoProvider.Urn),
+		Type:       tokens.Type(protoProvider.Type),
+		Name:       protoProvider.Name,
 		Properties: props,
 	}, nil
 }
@@ -673,6 +770,14 @@ func convertURNs(urns []resource.URN) []string {
 	return result
 }
 
+func revertToURNs(s []string) []resource.URN {
+	result := make([]resource.URN, len(s))
+	for idx := range s {
+		result[idx] = resource.URN(s[idx])
+	}
+	return result
+}
+
 func convertAlias(alias resource.Alias) string {
 	return string(alias.GetURN())
 }
@@ -686,6 +791,64 @@ func convertAliases(aliases []resource.Alias, aliasURNs []resource.URN) []string
 		result[idx+len(aliases)] = convertAlias(resource.Alias{URN: aliasURN})
 	}
 	return result
+}
+
+// TODO require good unit tests
+func revertAliases(aliasesAndURNs []string) ([]resource.Alias, error) {
+	var als []resource.Alias
+	for _, alias := range aliasesAndURNs {
+		p, err := revertAlias(alias)
+		if err != nil {
+			return nil, err
+		}
+		als = append(als, p)
+	}
+	return als, nil
+}
+
+// TODO require good unit tests
+func revertAlias(urn string) (resource.Alias, error) {
+	urnString := string(urn)
+
+	if !strings.HasPrefix(urnString, "urn:pulumi:") {
+		return resource.Alias{}, fmt.Errorf("invalid URN format: %s", urn)
+	}
+
+	// Split the URN by "::"
+	parts := strings.Split(urnString, "::")
+
+	if len(parts) < 4 {
+		return resource.Alias{}, fmt.Errorf("URN format does not contain enough parts: %s", urn)
+	}
+
+	stack := parts[1]
+	project := parts[2]
+	resourceTypeAndName := parts[3]
+
+	// Handle the case where the URN includes a parent
+	var parent resource.URN
+	if strings.Contains(resourceTypeAndName, "$") {
+		parentParts := strings.SplitN(resourceTypeAndName, "$", 2)
+		parent = resource.URN(parentParts[0] + "::" + parts[3]) // Reconstruct parent from parts
+		resourceTypeAndName = parentParts[1]                    // The actual resource type and name are after the $
+	}
+
+	// Split resource type and name
+	typeAndNameParts := strings.SplitN(resourceTypeAndName, "::", 2)
+	if len(typeAndNameParts) != 2 {
+		return resource.Alias{}, fmt.Errorf("invalid resource type and name format: %s", resourceTypeAndName)
+	}
+
+	resourceType := typeAndNameParts[0]
+	name := typeAndNameParts[1]
+
+	return resource.Alias{
+		Name:    name,
+		Type:    resourceType,
+		Parent:  parent,
+		Project: project,
+		Stack:   stack,
+	}, nil
 }
 
 func convertEnforcementLevel(el pulumirpc.EnforcementLevel) (apitype.EnforcementLevel, error) {
@@ -808,4 +971,201 @@ func constructConfig(opts *PolicyAnalyzerOptions) (string, error) {
 	}
 
 	return string(configJSON), nil
+}
+
+func FromProtoAnalyzerResource(protoResource *pulumirpc.AnalyzerResource) (*AnalyzerResource, error) {
+
+	props, err := UnmarshalProperties(protoResource.Properties, MarshalOptions{KeepUnknowns: true, KeepSecrets: true, SkipInternalKeys: true}) // Assuming a custom unmarshal method
+	if err != nil {
+		return nil, errors.Wrap(err, "unmarshalling properties")
+	}
+
+	prvdr, err := unmarshalProvider(protoResource.GetProvider())
+	if err != nil {
+		return nil, errors.Wrap(err, "unmarshalling provider")
+	}
+
+	// Populate the AnalyzerResource struct
+	rs := AnalyzerResource{
+		URN:        resource.URN(protoResource.GetUrn()),
+		Type:       tokens.Type(protoResource.GetType()),
+		Name:       protoResource.GetName(),
+		Properties: props,
+		Provider:   prvdr,
+	}
+	rs.Options, err = unmarshalResourceOptions(protoResource.Options)
+	if err != nil {
+		return nil, errors.Wrap(err, "unmarshalling resource options")
+	}
+	return &rs, nil
+}
+
+func FromProtoAnalyzerRequest(protoRequest *pulumirpc.AnalyzeRequest) (*AnalyzerResource, error) {
+	return FromProtoAnalyzerResource(&pulumirpc.AnalyzerResource{
+		Properties: protoRequest.GetProperties(),
+		Provider:   protoRequest.GetProvider(),
+		Urn:        protoRequest.GetUrn(),
+		Type:       protoRequest.GetType(),
+		Name:       protoRequest.GetName(),
+		Options:    protoRequest.GetOptions(),
+	})
+}
+
+func ToProtoAnalyzerResponse(diagnostics []AnalyzeDiagnostic) (*pulumirpc.AnalyzeResponse, error) {
+	var ds []*pulumirpc.AnalyzeDiagnostic
+	for _, d := range diagnostics {
+		ds = append(ds, &pulumirpc.AnalyzeDiagnostic{
+			PolicyName:        d.PolicyName,
+			PolicyPackName:    d.PolicyPackName,
+			PolicyPackVersion: d.PolicyPackVersion,
+			Description:       d.Description,
+			Message:           d.Message,
+			Tags:              d.Tags,
+			EnforcementLevel:  marshalEnforcementLevel(d.EnforcementLevel),
+			Urn:               string(d.URN),
+		})
+	}
+	return &pulumirpc.AnalyzeResponse{
+		Diagnostics: ds,
+	}, nil
+}
+
+func FromProtoAnlzrRsrcToStackResource(protoResource *pulumirpc.AnalyzerResource) (*AnalyzerStackResource, error) {
+	propertyDeps := make(map[resource.PropertyKey][]resource.URN)
+	for key, protoDeps := range protoResource.PropertyDependencies {
+		propertyDeps[resource.PropertyKey(key)] = revertToURNs(protoDeps.Urns)
+	}
+
+	rs, err := FromProtoAnalyzerResource(protoResource)
+	if err != nil {
+		return nil, err
+	}
+	return &AnalyzerStackResource{
+		Parent:               resource.URN(protoResource.GetParent()),
+		Dependencies:         revertToURNs(protoResource.GetDependencies()),
+		PropertyDependencies: propertyDeps,
+		AnalyzerResource:     *rs,
+	}, nil
+}
+
+func FromProtoAnalyzerStackRequest(protoResource *pulumirpc.AnalyzeStackRequest) ([]AnalyzerStackResource, error) {
+	var sr []AnalyzerStackResource
+
+	for _, r := range protoResource.Resources {
+		rs, err := FromProtoAnlzrRsrcToStackResource(r)
+		if err != nil {
+			return nil, err
+		}
+		sr = append(sr, *rs)
+	}
+
+	return sr, nil
+}
+
+func ToProtoRemediateResponse(remediations []Remediation) (*pulumirpc.RemediateResponse, error) {
+	results := make([]*pulumirpc.Remediation, len(remediations))
+	for i, r := range remediations {
+		tprops, err := MarshalProperties(r.Properties,
+			MarshalOptions{KeepUnknowns: true, KeepSecrets: true, SkipInternalKeys: false})
+		if err != nil {
+			return nil, err
+		}
+
+		results[i] = &pulumirpc.Remediation{
+			PolicyName:        r.PolicyName,
+			Description:       r.PolicyPackName,
+			PolicyPackName:    r.PolicyPackVersion,
+			PolicyPackVersion: r.Description,
+			Properties:        tprops,
+			Diagnostic:        r.Diagnostic,
+		}
+	}
+	return &pulumirpc.RemediateResponse{
+		Remediations: results,
+	}, nil
+}
+
+func ToProtoAnalyzerInfo(info *AnalyzerInfo) (*pulumirpc.AnalyzerInfo, error) {
+	var policies []*pulumirpc.PolicyInfo
+
+	for _, p := range info.Policies {
+		var required []string
+		configSchemaProps := resource.NewPropertyMapFromMap(nil)
+		if p.ConfigSchema != nil {
+			configSchemaProps = resource.NewPropertyMap(p.ConfigSchema.Properties)
+			required = p.ConfigSchema.Required
+		}
+		props, err := MarshalProperties(configSchemaProps,
+			MarshalOptions{KeepSecrets: true})
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal properties for policy pack: %q: %w", info.Name, err)
+		}
+		configSchema := pulumirpc.PolicyConfigSchema{
+			Properties: props,
+			Required:   required,
+		}
+
+		policies = append(policies, &pulumirpc.PolicyInfo{
+			Name:             p.Name,
+			Description:      p.Description,
+			EnforcementLevel: marshalEnforcementLevel(p.EnforcementLevel),
+			ConfigSchema:     &configSchema,
+		})
+	}
+
+	ai := &pulumirpc.AnalyzerInfo{
+		Name:           info.Name,
+		DisplayName:    info.DisplayName,
+		Policies:       policies,
+		Version:        info.Version,
+		SupportsConfig: info.SupportsConfig,
+	}
+
+	if info.InitialConfig != nil {
+		initialConfig := make(map[string]*pulumirpc.PolicyConfig)
+
+		c := make(map[string]*pulumirpc.PolicyConfig)
+
+		for k, v := range info.InitialConfig {
+			if !v.EnforcementLevel.IsValid() {
+				//return errors.Errorf("invalid enforcement level %q", v.EnforcementLevel)
+			}
+			c[k] = &pulumirpc.PolicyConfig{
+				EnforcementLevel: marshalEnforcementLevel(v.EnforcementLevel),
+				Properties:       marshalMap(v.Properties),
+			}
+		}
+
+		ai.InitialConfig = initialConfig
+	}
+
+	return ai, nil
+
+}
+
+func ToProtoPluginInfo(info *workspace.PluginInfo) *pulumirpc.PluginInfo {
+
+	if info.Version == nil {
+		// TODO I consider that it should panic as it definitely misimplementation of the lib
+		// TODO it will generate error ; otherwise we generate error themselves
+	}
+
+	return &pulumirpc.PluginInfo{
+		Version: info.Version.String(),
+	}
+}
+
+func FromProtoConfigureAnalyzerRequest(req *pulumirpc.ConfigureAnalyzerRequest) (map[string]AnalyzerPolicyConfig, error) {
+	conf := map[string]AnalyzerPolicyConfig{}
+	for k, v := range req.PolicyConfig {
+		el, err := convertEnforcementLevel(v.GetEnforcementLevel())
+		if err != nil {
+			return nil, err
+		}
+		conf[k] = AnalyzerPolicyConfig{
+			EnforcementLevel: el,
+			Properties:       unmarshalMap(v.GetProperties()),
+		}
+	}
+	return conf, nil
 }
