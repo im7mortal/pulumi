@@ -1747,6 +1747,7 @@ func IsPluginBundled(kind apitype.PluginKind, name string) bool {
 		(kind == apitype.ResourcePlugin && name == "pulumi-nodejs") ||
 		(kind == apitype.ResourcePlugin && name == "pulumi-python") ||
 		(kind == apitype.AnalyzerPlugin && name == "policy") ||
+		(kind == apitype.AnalyzerPlugin && name == "policy-dotnet") ||
 		(kind == apitype.AnalyzerPlugin && name == "policy-go") ||
 		(kind == apitype.AnalyzerPlugin && name == "policy-python")
 }
