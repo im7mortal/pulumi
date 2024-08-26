@@ -46,3 +46,4 @@ install_file sdk/python/cmd/pulumi-language-python-exec          linux darwin wi
 # Get pulumi-watch binaries
 ./scripts/get-pulumi-watch.sh "${LOCAL}"
 ./scripts/get-language-providers.sh "${LOCAL}"
+./scripts/get-analyzer-policy-proxies.sh "${LOCAL}"
