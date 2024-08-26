@@ -19,10 +19,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/diag"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/diag/colors"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/plugin"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"io"
 	"os"
 	"os/signal"
@@ -64,7 +61,8 @@ func parseRunParams(flag *flag.FlagSet, args []string) (*runParams, error) {
 }
 
 type MainConfig struct {
-	CompileTargetFunc CompileProgramFunc
+	GetAnalyzer             GetAnalyzerFunc
+	AnalyzerGRPCWrapperFunc plugin.AnalyzerGRPCWrapperFunc
 }
 
 // Launches the language host, which in turn fires up an RPC server implementing the LanguageRuntimeServer endpoint.
@@ -80,7 +78,7 @@ func Main(c *MainConfig) {
 
 	var cmd mainCmd
 
-	cmd.CompileTargetFunc = c.CompileTargetFunc
+	cmd.GetAnalyzer = c.GetAnalyzer
 
 	if err := cmd.Run(p); err != nil {
 		cmdutil.Exit(err)
@@ -91,7 +89,8 @@ type mainCmd struct {
 	Stdout io.Writer              // == os.Stdout
 	Getwd  func() (string, error) // == os.Getwd
 
-	CompileTargetFunc CompileProgramFunc
+	GetAnalyzer             GetAnalyzerFunc
+	AnalyzerGRPCWrapperFunc plugin.AnalyzerGRPCWrapperFunc
 }
 
 func (cmd *mainCmd) init() {
@@ -125,10 +124,10 @@ func (cmd *mainCmd) Run(p *runParams) error {
 	}
 
 	// The current directory is the policy directory
-	program, err := cmd.CompileTargetFunc(&CompileConfig{
+	plug, err := cmd.GetAnalyzer(ctx, &GetAnalyzerConfig{CompileConfig: &CompileConfig{
 		ProgramDirectory: cwd,
 		OutFile:          "",
-	})
+	}})
 	if err != nil {
 		return fmt.Errorf("could not compile policy: %w", err)
 	}
@@ -136,34 +135,20 @@ func (cmd *mainCmd) Run(p *runParams) error {
 
 	dialOpts = append(dialOpts, grpc.WithInsecure()) // TODO it must be secure
 
-	defSink := diag.DefaultSink(os.Stdout, os.Stderr, diag.FormatOptions{
-		Color: colors.Raw, // TODO
-	})
-
-	pctx, err := plugin.NewContextWithContext(
-		ctx,
-		defSink, defSink, nil,
-		"pwd", "root", nil, false,
-		nil, nil, nil)
-
-	if err != nil {
-
+	if cmd.AnalyzerGRPCWrapperFunc == nil {
+		cmd.AnalyzerGRPCWrapperFunc = plugin.NewAnalyzerPluginProxy
 	}
 
-	hostServerAddr := "hostServerAddr"
-
-	name := tokens.QName("policy-proxy")
-
-	plug, err := plugin.NewPolicyAnalyzerWithExe(hostServerAddr, pctx, name, "/home/user/dev/pulumi/pulumi-policy/petr/pulumi-analyzer-policy-go", program.Program, nil)
+	analyzerServer, err := cmd.AnalyzerGRPCWrapperFunc(plug)
 	if err != nil {
-		return fmt.Errorf("could not start policy analyzer: %w", err)
+		return fmt.Errorf("could not compile policy: %w", err)
 	}
 
 	// Fire up a gRPC server, letting the kernel choose a free port.
 	handle, err := rpcutil.ServeWithOptions(rpcutil.ServeOptions{
 		Cancel: cancelChannel,
 		Init: func(srv *grpc.Server) error {
-			pulumirpc.RegisterAnalyzerServer(srv, plugin.NewAnalyzerPluginProxy(plug))
+			pulumirpc.RegisterAnalyzerServer(srv, analyzerServer)
 			return nil
 		},
 		Options: rpcutil.OpenTracingServerInterceptorOptions(nil),

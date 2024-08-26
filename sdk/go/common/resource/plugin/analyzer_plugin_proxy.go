@@ -6,10 +6,12 @@ import (
 	pbempty "google.golang.org/protobuf/types/known/emptypb"
 )
 
-func NewAnalyzerPluginProxy(analyzer Analyzer) pulumirpc.AnalyzerServer {
+type AnalyzerGRPCWrapperFunc func(analyzer Analyzer) (pulumirpc.AnalyzerServer, error)
+
+func NewAnalyzerPluginProxy(analyzer Analyzer) (pulumirpc.AnalyzerServer, error) {
 	return &analyzerServer{
 		analyzer: analyzer,
-	}
+	}, nil
 }
 
 type analyzerServer struct {

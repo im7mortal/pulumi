@@ -21,5 +21,7 @@ import (
 
 // Launches the language host, which in turn fires up an RPC server implementing the LanguageRuntimeServer endpoint.
 func main() {
-	policyAnalyzer.Main(&policyAnalyzer.MainConfig{CompileTargetFunc: gocompiler.CompileProgram})
+	policyAnalyzer.Main(&policyAnalyzer.MainConfig{
+		GetAnalyzer: policyAnalyzer.GetAnalyzerWithCompilerFunc(gocompiler.CompileProgram),
+	})
 }

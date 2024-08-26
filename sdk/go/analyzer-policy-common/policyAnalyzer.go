@@ -14,8 +14,15 @@
 
 package policyAnalyzer
 
+type GolangConfig struct{}
+
+type DotnetConfig struct{}
+
 type CompileConfig struct {
 	ProgramDirectory, OutFile string
+
+	GolangConfig GolangConfig
+	DotnetConfig DotnetConfig
 }
 
 type CompileResult struct {

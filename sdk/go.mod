@@ -1,6 +1,11 @@
 module github.com/pulumi/pulumi/sdk/v3
 
 go 1.18
+replace (
+	github.com/pulumi/pulumi/pkg/v3 => /home/user/dev/pulumi/pulumi/pkg
+	github.com/pulumi/pulumi/sdk/go/pulumi-analyzer-policy-go/v3/policy => ./policy
+	github.com/pulumi/pulumi/sdk/v3 => /home/user/dev/pulumi/pulumi/sdk
+)
 
 replace golang.org/x/text => golang.org/x/text v0.3.8
 
