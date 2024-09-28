@@ -28,13 +28,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/rpcCmd"
 	"io"
 	"math/rand"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -101,23 +100,26 @@ var (
 // Launches the language host RPC endpoint, which in turn fires up an RPC server implementing the
 // LanguageRuntimeServer RPC endpoint.
 func main() {
-	var tracing string
-	flag.StringVar(&tracing, "tracing", "", "Emit tracing to a Zipkin-compatible tracing endpoint")
-	flag.String("virtualenv", "", "[obsolete] Virtual environment path to use")
-	flag.String("root", "", "[obsolete] Project root path to use")
-	flag.String("typechecker", "", "[obsolete] Use a typechecker to type check")
-	flag.String("toolchain", "pip", "[obsolete] Select the package manager to use for dependency management.")
+	rc, err := rpcCmd.NewRpcCmd(&rpcCmd.RpcCmdConfig{
+		TracingName:  "pulumi-language-python",
+		RootSpanName: "pulumi-language-python",
+	})
+	if err != nil {
+		cmdutil.Exit(err)
+	}
 
+	rc.Flag.String("virtualenv", "", "[obsolete] Virtual environment path to use")
+	rc.Flag.String("root", "", "[obsolete] Project root path to use")
+	rc.Flag.String("typechecker", "", "[obsolete] Use a typechecker to type check")
+	rc.Flag.String("toolchain", "pip", "[obsolete] Select the package manager to use for dependency management.")
 	// You can use the below flag to request that the language host load a specific executor instead of probing the
 	// PATH.  This can be used during testing to override the default location.
 	var givenExecutor string
-	flag.StringVar(&givenExecutor, "use-executor", "",
+	rc.Flag.StringVar(&givenExecutor, "use-executor", "",
 		"Use the given program as the executor instead of looking for one on PATH")
 
-	flag.Parse()
-	args := flag.Args()
+	rc.Flag.Parse(os.Args[1:])
 	logging.InitLogging(false, 0, false)
-	cmdutil.InitTracing("pulumi-language-python", "pulumi-language-python", tracing)
 
 	var pythonExec string
 	if givenExecutor == "" {
@@ -141,46 +143,11 @@ func main() {
 		pythonExec = givenExecutor
 	}
 
-	// Optionally pluck out the engine so we can do logging, etc.
-	var engineAddress string
-	if len(args) > 0 {
-		engineAddress = args[0]
-	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	// map the context Done channel to the rpcutil boolean cancel channel
-	cancelChannel := make(chan bool)
-	go func() {
-		<-ctx.Done()
-		cancel() // deregister signal handler
-		close(cancelChannel)
-	}()
-	err := rpcutil.Healthcheck(ctx, engineAddress, 5*time.Minute, cancel)
-	if err != nil {
-		cmdutil.Exit(fmt.Errorf("could not start health check host RPC server: %w", err))
-	}
-
-	// Fire up a gRPC server, letting the kernel choose a free port.
-	handle, err := rpcutil.ServeWithOptions(rpcutil.ServeOptions{
-		Cancel: cancelChannel,
-		Init: func(srv *grpc.Server) error {
-			host := newLanguageHost(pythonExec, engineAddress, tracing, "")
-			pulumirpc.RegisterLanguageRuntimeServer(srv, host)
-			return nil
-		},
-		Options: rpcutil.OpenTracingServerInterceptorOptions(nil),
-	})
-	if err != nil {
-		cmdutil.Exit(fmt.Errorf("could not start language host RPC server: %w", err))
-	}
-
-	// Otherwise, print out the port so that the spawner knows how to reach us.
-	fmt.Printf("%d\n", handle.Port)
-
-	// And finally wait for the server to stop serving.
-	if err := <-handle.Done; err != nil {
-		cmdutil.Exit(fmt.Errorf("language host RPC stopped serving: %w", err))
-	}
+	rc.Run(func(srv *grpc.Server) error {
+		host := newLanguageHost(pythonExec, rc.EngineAddress, rc.Tracing)
+		pulumirpc.RegisterLanguageRuntimeServer(srv, host)
+		return nil
+	}, func() {})
 }
 
 // pythonLanguageHost implements the LanguageRuntimeServer interface
