@@ -15,17 +15,12 @@
 package provider
 
 import (
-	"context"
-	"errors"
-	"flag"
 	"fmt"
-	"time"
-
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/logging"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/rpcCmd"
 	"google.golang.org/grpc"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/util/logging"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/util/rpcutil"
 	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
 )
 
@@ -36,66 +31,35 @@ var tracing string
 // Main is the typical entrypoint for a resource provider plugin.  Using it isn't required but can cut down
 // significantly on the amount of boilerplate necessary to fire up a new resource provider.
 func Main(name string, provMaker func(*HostClient) (pulumirpc.ResourceProviderServer, error)) error {
-	flag.StringVar(&tracing, "tracing", "", "Emit tracing to a Zipkin-compatible tracing endpoint")
-	flag.Parse()
 
 	// Initialize loggers before going any further.
 	logging.InitLogging(false, 0, false)
-	cmdutil.InitTracing(name, name, tracing)
 
-	// Read the non-flags args and connect to the engine.
-	var cancelChannel chan bool
-	args := flag.Args()
+	rc, err := rpcCmd.NewRpcCmd(&rpcCmd.RpcCmdConfig{
+		TracingName:  name,
+		RootSpanName: name,
+	})
+	if err != nil {
+		cmdutil.Exit(err)
+	}
+
 	var host *HostClient
-	if len(args) == 0 {
-		// Start the provider in Attach mode
-	} else if len(args) == 1 {
-		var err error
-		host, err = NewHostClient(args[0])
+
+	if rc.EngineAddress != "" {
+		host, err = NewHostClient(rc.EngineAddress)
 		if err != nil {
 			return fmt.Errorf("fatal: could not connect to host RPC: %w", err)
 		}
+	}
 
-		// If we have a host cancel our cancellation context if it fails the healthcheck
-		ctx, cancel := context.WithCancel(context.Background())
-		// map the context Done channel to the rpcutil boolean cancel channel
-		cancelChannel = make(chan bool)
-		go func() {
-			<-ctx.Done()
-			close(cancelChannel)
-		}()
-		err = rpcutil.Healthcheck(ctx, args[0], 5*time.Minute, cancel)
-		if err != nil {
-			return fmt.Errorf("could not start health check host RPC server: %w", err)
+	rc.Run(func(srv *grpc.Server) error {
+		prov, proverr := provMaker(host)
+		if proverr != nil {
+			return fmt.Errorf("failed to create resource provider: %v", proverr)
 		}
-	} else {
-		return errors.New("fatal: could not connect to host RPC; missing argument")
-	}
-
-	// Fire up a gRPC server, letting the kernel choose a free port for us.
-	handle, err := rpcutil.ServeWithOptions(rpcutil.ServeOptions{
-		Cancel: cancelChannel,
-		Init: func(srv *grpc.Server) error {
-			prov, proverr := provMaker(host)
-			if proverr != nil {
-				return fmt.Errorf("failed to create resource provider: %v", proverr)
-			}
-			pulumirpc.RegisterResourceProviderServer(srv, prov)
-			return nil
-		},
-		Options: rpcutil.OpenTracingServerInterceptorOptions(nil),
-	})
-	if err != nil {
-		return fmt.Errorf("fatal: %w", err)
-	}
-
-	// The resource provider protocol requires that we now write out the port we have chosen to listen on.
-	fmt.Printf("%d\n", handle.Port)
-
-	// Finally, wait for the server to stop serving.
-	if err := <-handle.Done; err != nil {
-		return fmt.Errorf("fatal: %w", err)
-	}
+		pulumirpc.RegisterResourceProviderServer(srv, prov)
+		return nil
+	}, func() {})
 
 	return nil
 }
