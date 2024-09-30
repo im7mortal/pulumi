@@ -94,7 +94,7 @@ const (
 // up an RPC server implementing the LanguageRuntimeServer RPC
 // endpoint.
 func main() {
-	rc, err := rpcCmd.NewRpcCmd(&rpcCmd.RpcCmdConfig{
+	rc, err := rpcCmd.NewServer(rpcCmd.Config{
 		TracingName:  "pulumi-language-nodejs",
 		RootSpanName: "pulumi-language-nodejs",
 	})
@@ -116,7 +116,7 @@ func main() {
 	logging.InitLogging(false, 0, false)
 
 	rc.Run(func(srv *grpc.Server) error {
-		host := newLanguageHost(rc.EngineAddress, rc.Tracing, false /* forceTsc */)
+		host := newLanguageHost(rc.GetEngineAddress(), rc.GetTracing(), false /* forceTsc */)
 		pulumirpc.RegisterLanguageRuntimeServer(srv, host)
 		return nil
 	}, func() {})
