@@ -100,7 +100,7 @@ var (
 // Launches the language host RPC endpoint, which in turn fires up an RPC server implementing the
 // LanguageRuntimeServer RPC endpoint.
 func main() {
-	rc, err := rpcCmd.NewRpcCmd(&rpcCmd.RpcCmdConfig{
+	rc, err := rpcCmd.NewServer(rpcCmd.Config{
 		TracingName:  "pulumi-language-python",
 		RootSpanName: "pulumi-language-python",
 	})
@@ -144,7 +144,7 @@ func main() {
 	}
 
 	rc.Run(func(srv *grpc.Server) error {
-		host := newLanguageHost(pythonExec, rc.EngineAddress, rc.Tracing)
+		host := newLanguageHost(pythonExec, rc.GetEngineAddress(), rc.GetTracing())
 		pulumirpc.RegisterLanguageRuntimeServer(srv, host)
 		return nil
 	}, func() {})
