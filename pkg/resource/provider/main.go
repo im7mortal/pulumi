@@ -35,7 +35,7 @@ func Main(name string, provMaker func(*HostClient) (pulumirpc.ResourceProviderSe
 	// Initialize loggers before going any further.
 	logging.InitLogging(false, 0, false)
 
-	rc, err := rpcCmd.NewRpcCmd(&rpcCmd.RpcCmdConfig{
+	rc, err := rpcCmd.NewServer(rpcCmd.Config{
 		TracingName:  name,
 		RootSpanName: name,
 	})
@@ -45,11 +45,9 @@ func Main(name string, provMaker func(*HostClient) (pulumirpc.ResourceProviderSe
 
 	var host *HostClient
 
-	if rc.EngineAddress != "" {
-		host, err = NewHostClient(rc.EngineAddress)
-		if err != nil {
-			return fmt.Errorf("fatal: could not connect to host RPC: %w", err)
-		}
+	host, err = NewHostClient(rc.GetTracing())
+	if err != nil {
+		return fmt.Errorf("fatal: could not connect to host RPC: %w", err)
 	}
 
 	rc.Run(func(srv *grpc.Server) error {
