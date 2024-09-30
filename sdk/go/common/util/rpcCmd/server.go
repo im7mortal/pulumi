@@ -2,7 +2,6 @@ package rpcCmd
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -10,15 +9,16 @@ import (
 
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/rpcutil"
+	"github.com/spf13/pflag"
 	"google.golang.org/grpc"
 )
 
 const DefaultHealthCheck = 5 * time.Minute
 
 type Server struct {
-	// Flag is the FlagSet containing registered rpcCmd flags. By default, it's set to flag.ExitOnError.
+	// Flag is the FlagSet containing registered rpcCmd flags. By default, it's set to pflag.ExitOnError.
 	// If a Flag is provided in the config, that one is used, but with rpcCmd flags registered as well.
-	Flag *flag.FlagSet
+	Flag *pflag.FlagSet
 
 	// tracing is a Zipkin-compatible tracing endpoint.
 	tracing string
@@ -35,7 +35,7 @@ type Server struct {
 
 type Config struct {
 	// Flag allows specifying a custom FlagSet if behavior different from the default flag.ExitOnError is required.
-	Flag *flag.FlagSet
+	Flag *pflag.FlagSet
 
 	// TracingName and RootSpanName are required if tracing is enabled.
 	TracingName  string
@@ -56,7 +56,9 @@ func NewServer(c Config) (*Server, error) {
 	s := &Server{config: c}
 
 	// Server parses flags with a private instance of FlagSet.
-	s.Flag = flag.NewFlagSet("", flag.ContinueOnError)
+	s.Flag = pflag.NewFlagSet("", pflag.ContinueOnError)
+	// Filter out unknown flags, caller can register any flags later
+	s.Flag.ParseErrorsWhitelist.UnknownFlags = true
 	s.registerFlags()
 	if err := s.Flag.Parse(os.Args[1:]); err != nil {
 		return nil, errW(err)
@@ -79,9 +81,9 @@ func NewServer(c Config) (*Server, error) {
 	return s, nil
 }
 
-func getMockFlagSet(f *flag.FlagSet) *flag.FlagSet {
+func getMockFlagSet(f *pflag.FlagSet) *pflag.FlagSet {
 	s := Server{}
-	s.Flag = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	s.Flag = pflag.NewFlagSet(os.Args[0], pflag.ExitOnError)
 	if f != nil {
 		s.Flag = f
 	}
