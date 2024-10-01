@@ -34,11 +34,14 @@ func TestPing(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w // Redirect stdout
 
-	go s.Run(func(server *grpc.Server) error {
-		pingpb.RegisterPingServiceServer(server, &PingServer{})
-		return nil
-	}, func() {})
-
+	finished := make(chan struct{})
+	go func() {
+		s.Run(func(server *grpc.Server) error {
+			pingpb.RegisterPingServiceServer(server, &PingServer{})
+			return nil
+		}, func() {})
+		close(finished)
+	}()
 	// give the server time to start and write port to the stdout
 	time.Sleep(time.Second)
 
@@ -73,5 +76,11 @@ func TestPing(t *testing.T) {
 	assert.Equal(t, "Pong", resp.Reply, "Expected Pong response")
 
 	close(s.cancelChannel)
+
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Errorf("The server supposed to shutdown immediately after cancel signal but after 1 second it's still not finished")
+	}
 
 }
