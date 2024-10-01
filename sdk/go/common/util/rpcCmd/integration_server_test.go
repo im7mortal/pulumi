@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -138,24 +137,20 @@ func TestSubprocessExit1(t *testing.T) {
 			}()
 
 			// Read stdout to capture the port number
-			var port string
-			done := make(chan struct{})
-
+			portC := make(chan string, 10000)
 			go func() {
 				scanner := bufio.NewScanner(stdoutPipe)
-				scanner.Scan()
-				line := scanner.Text()
-				fmt.Printf("%s\n", line) // Print the output
-				if strings.TrimSpace(line) != "" && port == "" {
-					// We assume the port is the first non-empty line printed
-					port = line
+				for scanner.Scan() {
+					line := scanner.Text()
+					fmt.Printf("%s\n", line)
+					portC <- line
 				}
-				close(done)
 			}()
 
-			// Wait for the output to be captured
+			// Wait for the port to be captured
+			var port string
 			select {
-			case <-done:
+			case port = <-portC:
 			case <-time.After(2 * time.Second):
 				t.Fatal("Timeout waiting for the port to be printed")
 			}
