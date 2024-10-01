@@ -31,6 +31,10 @@ type Server struct {
 
 	config      Config
 	grpcOptions []grpc.ServerOption
+
+	// only for testing
+	handle        rpcutil.ServeHandle
+	cancelChannel chan bool
 }
 
 type Config struct {
@@ -132,11 +136,11 @@ func (s *Server) Run(iFunc InitFunc, fFunc FinishFunc) {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	// Map the context's Done channel to the rpcutil boolean cancel channel.
-	cancelChannel := make(chan bool)
+	s.cancelChannel = make(chan bool)
 	go func() {
 		<-ctx.Done()
 		cancel() // Deregister handler so we don't catch another interrupt.
-		close(cancelChannel)
+		close(s.cancelChannel)
 	}()
 	err = rpcutil.Healthcheck(ctx, s.engineAddr, s.getHealthcheckD(), cancel)
 	if err != nil {
@@ -145,8 +149,8 @@ func (s *Server) Run(iFunc InitFunc, fFunc FinishFunc) {
 	}
 
 	// Fire up a gRPC server, letting the kernel choose a free port.
-	handle, err := rpcutil.ServeWithOptions(rpcutil.ServeOptions{
-		Cancel:  cancelChannel,
+	s.handle, err = rpcutil.ServeWithOptions(rpcutil.ServeOptions{
+		Cancel:  s.cancelChannel,
 		Init:    iFunc,
 		Options: s.getGrpcOptions(),
 	})
@@ -156,10 +160,10 @@ func (s *Server) Run(iFunc InitFunc, fFunc FinishFunc) {
 	}
 
 	// Print the port so that the spawner knows how to reach the server.
-	fmt.Fprintf(os.Stdout, "%d\n", handle.Port)
+	fmt.Fprintf(os.Stdout, "%d\n", s.handle.Port)
 
 	// Wait for the server to stop serving. If an error occurs, it will be handled in defer.
-	if err = <-handle.Done; err != nil {
+	if err = <-s.handle.Done; err != nil {
 		err = fmt.Errorf("could not start language host RPC server: %w", err)
 	}
 }
