@@ -15,14 +15,14 @@ import (
 )
 
 // PingServer implements the PingService.
-type PingServer struct {
-	pingpb.UnimplementedPingServiceServer
-}
-
-// Ping method returns a "Pong" response.
-func (s *PingServer) Ping(ctx context.Context, req *pingpb.PingRequest) (*pingpb.PingResponse, error) {
-	return &pingpb.PingResponse{Reply: "Pong"}, nil
-}
+//type PingServer struct {
+//	pingpb.UnimplementedPingServiceServer
+//}
+//
+//// Ping method returns a "Pong" response.
+//func (s *PingServer) Ping(ctx context.Context, req *pingpb.PingRequest) (*pingpb.PingResponse, error) {
+//	return &pingpb.PingResponse{Reply: "Pong"}, nil
+//}
 
 func TestPing(t *testing.T) {
 
