@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -83,4 +84,28 @@ func TestPing(t *testing.T) {
 		t.Errorf("The server supposed to shutdown immediately after cancel signal but after 1 second it's still not finished")
 	}
 
+}
+
+func TestSubprocessExit(t *testing.T) {
+	// Run the test in a subprocess
+	cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcess")
+	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+	err := cmd.Run()
+
+	// Check if the subprocess exited as expected
+	exitError, ok := err.(*exec.ExitError)
+	if ok {
+		// Check the exit code of the subprocess
+		assert.Equal(t, 1, exitError.ExitCode(), "Expected exit code 1")
+	} else {
+		t.Fatalf("Subprocess did not exit as expected: %v", err)
+	}
+}
+
+func TestHelperProcess(t *testing.T) {
+	// This is the function that will run in the subprocess
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	os.Exit(1) // Simulate an exit in the subprocess
 }
