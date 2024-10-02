@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
+	"github.com/spf13/pflag"
 	"os"
 	"os/exec"
 	"strconv"
@@ -30,6 +31,17 @@ func findFlagValue(args []string, flag string) (bool, string) {
 			return true, args[i+1] // it will panic if test input is invalid
 		}
 	}
+	return false, ""
+}
+
+func findPluginPathValue(args []string) (bool, string) {
+	flagSet := pflag.NewFlagSet("", pflag.ContinueOnError)
+	flagSet.ParseErrorsWhitelist.UnknownFlags = true
+	flagSet.Parse(args)
+	if len(flagSet.Args()) >= 2 {
+		return true, flagSet.Args()[1]
+	}
+
 	return false, ""
 }
 
@@ -166,6 +178,10 @@ func TestSubprocessExit1(t *testing.T) {
 
 			if set, val := findFlagValue(testCase.give, tracingFlag); set {
 				RequestTheServer(t, client, tracingFlag, val)
+			}
+
+			if set, val := findPluginPathValue(testCase.give); set {
+				RequestTheServer(t, client, pluginPathField, val)
 			}
 
 			if testCase.config.HealthcheckD != 0 {
