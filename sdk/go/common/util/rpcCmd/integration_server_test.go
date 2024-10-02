@@ -45,31 +45,38 @@ func findPluginPathValue(args []string) (bool, string) {
 	return false, ""
 }
 
+var standardFunc = func(s *Server) {
+	s.Run(func(server *grpc.Server) error {
+		pingpb.RegisterPingServiceServer(server, &PingServer{s: s})
+		return nil
+	})
+}
+
 var tests = map[string]struct {
 	config Config
 	give   []string
 
 	f func(s *Server)
+
+	timeOutBefore    time.Duration
+	checkHealthCheck bool
 }{
 	"simplest_run": {
 		config: Config{},
 		give:   []string{"localhost:"},
-		f: func(s *Server) {
-			s.Run(func(server *grpc.Server) error {
-				pingpb.RegisterPingServiceServer(server, &PingServer{s: s})
-				return nil
-			})
-		},
+		f:      standardFunc,
 	},
 	"run_with_tracing_plugin_path": {
-		config: Config{HealthcheckD: time.Second},
+		config: Config{HealthcheckD: time.Minute},
 		give:   []string{"localhost:", pluginPath, tracingFlag, "localhost:8989"},
-		f: func(s *Server) {
-			s.Run(func(server *grpc.Server) error {
-				pingpb.RegisterPingServiceServer(server, &PingServer{s: s})
-				return nil
-			})
-		},
+		f:      standardFunc,
+	},
+	"engine_stopped_healtcheck_shutdown": {
+		config:           Config{HealthcheckD: 500 * time.Millisecond},
+		give:             []string{"localhost:"},
+		f:                standardFunc,
+		timeOutBefore:    2 * time.Second,
+		checkHealthCheck: true,
 	},
 }
 
@@ -127,7 +134,7 @@ func TestSubprocessExit1(t *testing.T) {
 				t.Fatalf("Failed to get stdout pipe: %v", err)
 			}
 
-			serverDone := make(chan struct{})
+			serverDone, notifyServerDone := context.WithCancel(context.Background())
 			// Start the command
 			go func() {
 				if err := cmd.Start(); err != nil { // Use Start() instead of Run() here to avoid blocking
@@ -140,7 +147,7 @@ func TestSubprocessExit1(t *testing.T) {
 					time.Sleep(time.Second)
 					t.Fatalf("Subprocess finished with error: %v", err)
 				}
-				close(serverDone)
+				notifyServerDone()
 			}()
 
 			// Read stdout to capture the port number
@@ -188,6 +195,17 @@ func TestSubprocessExit1(t *testing.T) {
 				RequestTheServer(t, client, healthCheckIntervalField, testCase.config.HealthcheckD.String())
 			}
 
+			// in case we're testing healthCheck scenarios
+			if testCase.timeOutBefore != 0 {
+				time.Sleep(testCase.timeOutBefore)
+				if testCase.checkHealthCheck {
+					assert.Error(t, serverDone.Err(), "the healthcheck had to be triggered in this scenario")
+					return
+				} else {
+					assert.NoError(t, serverDone.Err(), "the healthcheck had to be passed in this scenario")
+				}
+			}
+
 			// Simulate sending the os.Interrupt signal to the subprocess
 			err = cmd.Process.Signal(os.Interrupt)
 			if err != nil {
@@ -196,7 +214,7 @@ func TestSubprocessExit1(t *testing.T) {
 
 			// Wait for the server (subprocess) to shut down
 			select {
-			case <-serverDone:
+			case <-serverDone.Done():
 				fmt.Println("Server shutdown gracefully after receiving signal")
 			case <-time.After(2 * time.Second):
 				t.Fatalf("Server did not shutdown after receiving signal")
