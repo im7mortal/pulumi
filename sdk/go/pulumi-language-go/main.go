@@ -135,7 +135,7 @@ func main() {
 		host := newLanguageHost(rc.GetEngineAddress(), cwd, rc.GetTracing())
 		pulumirpc.RegisterLanguageRuntimeServer(srv, host)
 		return nil
-	}, func() {})
+	})
 }
 
 // goLanguageHost implements the LanguageRuntimeServer interface for use as an API endpoint.
