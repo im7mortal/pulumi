@@ -121,6 +121,16 @@ func RequestTheServer(t *testing.T, client pingpb.PingServiceClient, requested, 
 
 }
 
+func checkExitCode(t *testing.T, err error) {
+	if exitError, ok := err.(*exec.ExitError); ok {
+		if exitError.ExitCode() != 0 {
+			t.Fatalf("Subprocess exited with non-zero exit code: %d", exitError.ExitCode())
+		}
+	} else if err != nil {
+		t.Fatalf("Subprocess finished with error: %v", err)
+	}
+}
+
 func TestSubprocessExit1(t *testing.T) {
 	for testCaseId, testCase := range tests {
 		t.Run(fmt.Sprintf("Test Case %s", testCaseId), func(t *testing.T) {
@@ -135,6 +145,9 @@ func TestSubprocessExit1(t *testing.T) {
 			}
 
 			serverDone, notifyServerDone := context.WithCancel(context.Background())
+
+			var errCmd error
+
 			// Start the command
 			go func() {
 				if err := cmd.Start(); err != nil { // Use Start() instead of Run() here to avoid blocking
@@ -142,11 +155,9 @@ func TestSubprocessExit1(t *testing.T) {
 				}
 
 				// Wait for the subprocess to finish
-				err = cmd.Wait()
-				if err != nil {
-					time.Sleep(time.Second)
-					t.Fatalf("Subprocess finished with error: %v", err)
-				}
+				errCmd = cmd.Wait()
+
+				// Check the exit code
 				notifyServerDone()
 			}()
 
@@ -200,6 +211,7 @@ func TestSubprocessExit1(t *testing.T) {
 				time.Sleep(testCase.timeOutBefore)
 				if testCase.checkHealthCheck {
 					assert.Error(t, serverDone.Err(), "the healthcheck had to be triggered in this scenario")
+					checkExitCode(t, errCmd)
 					return
 				} else {
 					assert.NoError(t, serverDone.Err(), "the healthcheck had to be passed in this scenario")
@@ -219,6 +231,9 @@ func TestSubprocessExit1(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				t.Fatalf("Server did not shutdown after receiving signal")
 			}
+
+			checkExitCode(t, errCmd)
+
 		})
 	}
 }
