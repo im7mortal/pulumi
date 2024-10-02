@@ -31,6 +31,9 @@ const (
 
 	ENGINE_ADDR  = "ENGINE_ADDR"
 	TRACING_ADDR = "TRACING_ADDR"
+
+	overrideTracingName  = "GDvveMJ8"
+	overrideRootSpanName = "Sz7JghpR"
 )
 
 func findFlagValue(args []string, flag string) (bool, string) {
@@ -70,7 +73,8 @@ var tests = map[string]struct {
 	timeOutBefore    time.Duration
 	checkHealthCheck bool
 
-	tracingWarning string
+	tracingWarning   string
+	tracingOverrides bool
 }{
 	"simplest_run": {
 		config: Config{},
@@ -88,6 +92,19 @@ var tests = map[string]struct {
 			TracingName: tracingName, RootSpanName: rootSpanName},
 		give: []string{ENGINE_ADDR, tracingFlag, TRACING_ADDR},
 		f:    standardFunc,
+	},
+	"ensure_tracing_override": {
+		config: Config{HealthcheckD: time.Minute,
+			TracingName: tracingName, RootSpanName: rootSpanName},
+		give: []string{ENGINE_ADDR, tracingFlag, TRACING_ADDR},
+		f: func(s *Server) {
+			s.SetTracingNames(overrideTracingName, overrideRootSpanName)
+			s.Run(func(server *grpc.Server) error {
+				pingpb.RegisterPingServiceServer(server, &PingServer{s: s})
+				return nil
+			})
+		},
+		tracingOverrides: true,
 	},
 	"engine_stopped_healtcheck_shutdown": {
 		config:           Config{HealthcheckD: 500 * time.Millisecond},
@@ -243,9 +260,17 @@ func TestSubprocessExit1(t *testing.T) {
 				if testCase.tracingWarning == "" {
 					select {
 					case traceString := <-tracingChan:
-						assert.Contains(t, traceString, tracingName)
-						// TODO figure out why rootSpanName is not there. I assume it requires more complicated mock server?
-						//assert.Contains(t, traceString, rootSpanName)
+
+						if testCase.tracingOverrides {
+							assert.Contains(t, traceString, overrideTracingName)
+							// TODO figure out why rootSpanName is not there. I assume it requires more complicated mock server?
+							//assert.Contains(t, traceString, overrideRootSpanName)
+						} else {
+							assert.Contains(t, traceString, tracingName)
+							// TODO figure out why rootSpanName is not there. I assume it requires more complicated mock server?
+							//assert.Contains(t, traceString, rootSpanName)
+						}
+
 					case <-time.After(2 * time.Second):
 						t.Fatalf("Didn't get expected tracing")
 					}
