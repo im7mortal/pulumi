@@ -35,6 +35,8 @@ const (
 
 	overrideTracingName  = "GDvveMJ8"
 	overrideRootSpanName = "Sz7JghpR"
+
+	finishFuncMessage = "FINISH_FUNC_MESSAGE"
 )
 
 func findFlagValue(args []string, flag string) (bool, string) {
@@ -59,6 +61,11 @@ func findPluginPathValue(args []string) (bool, string) {
 }
 
 var standardFunc = func(s *Server) {
+
+	s.FinishFunc = func() {
+		fmt.Println(finishFuncMessage)
+	}
+
 	s.Run(func(server *grpc.Server) error {
 		pingpb.RegisterPingServiceServer(server, &PingServer{s: s})
 		return nil
@@ -105,6 +112,9 @@ var tests = map[string]struct {
 			TracingName: tracingName, RootSpanName: rootSpanName},
 		give: []string{ENGINE_ADDR, tracingFlag, TRACING_ADDR},
 		f: func(s *Server) {
+			s.FinishFunc = func() {
+				fmt.Println(finishFuncMessage)
+			}
 			s.SetTracingNames(overrideTracingName, overrideRootSpanName)
 			s.Run(func(server *grpc.Server) error {
 				pingpb.RegisterPingServiceServer(server, &PingServer{s: s})
@@ -234,11 +244,16 @@ func TestSubprocess(t *testing.T) {
 
 			// Read stdout to capture the port number
 			portC := make(chan string, 10000)
+			finishFunc := make(chan struct{})
 			go func() {
 				scanner := bufio.NewScanner(stdoutPipe)
 				for scanner.Scan() {
 					line := scanner.Text()
 					fmt.Printf("%s\n", line)
+					if line == finishFuncMessage {
+						close(finishFunc)
+						continue
+					}
 					portC <- line
 				}
 			}()
@@ -325,6 +340,7 @@ func TestSubprocess(t *testing.T) {
 				time.Sleep(testCase.timeOutBefore)
 				if testCase.checkHealthCheck {
 					assert.Error(t, serverDone.Err(), "the healthcheck had to be triggered in this scenario")
+					checkFinishFunc(t, finishFunc)
 					checkExitCode(t, errCmd)
 					return
 				} else {
@@ -346,9 +362,20 @@ func TestSubprocess(t *testing.T) {
 				t.Fatalf("Server did not shutdown after receiving signal")
 			}
 
+			// Ensure that finish func was executed
+			checkFinishFunc(t, finishFunc)
 			checkExitCode(t, errCmd)
 
 		})
+	}
+}
+
+func checkFinishFunc(t *testing.T, finish chan struct{}) {
+	select {
+	case <-finish:
+		fmt.Println("Finish func was executed")
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Finish func wasn't executed")
 	}
 }
 
