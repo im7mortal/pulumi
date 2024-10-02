@@ -127,10 +127,16 @@ func (s *Server) Run(iFunc InitFunc) {
 	if s.tracing != "" {
 		// TracingName and RootSpanName are required if tracing is enabled.
 		if s.config.TracingName == "" || s.config.RootSpanName == "" {
-			err = errW(fmt.Errorf("missing required tracing configuration: TracingName or RootSpanName. " +
-				"Provide them in Config"))
+			// Lack of tracing configuration is a warning
+			// Print the warnings to stderr as the executor expects only the port value in stdout
+			fmt.Fprintln(os.Stderr, "Tracing disabled.")
+			fmt.Fprintln(os.Stderr, "--tracing is set to "+s.tracing+", but")
+			fmt.Fprintln(os.Stderr, "required tracing configuration is missing: TracingName or RootSpanName.")
+			fmt.Fprintln(os.Stderr, "Provide them in the configuration,")
+			fmt.Fprintln(os.Stderr, "or set them using SetTracingNames.")
+		} else {
+			cmdutil.InitTracing(s.config.TracingName, s.config.RootSpanName, s.GetTracing())
 		}
-		cmdutil.InitTracing(s.config.TracingName, s.config.RootSpanName, s.GetTracing())
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
