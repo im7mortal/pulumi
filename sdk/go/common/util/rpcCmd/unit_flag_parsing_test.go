@@ -54,7 +54,7 @@ func TestNewServer_MissingEngineAddress(t *testing.T) {
 // Test registerFlags function (private function)
 func TestServer_RegisterFlags(t *testing.T) {
 	// Mock os.Args
-	os.Args = []string{"cmd", "localhost:8080", "--tracing", "test-tracing"}
+	os.Args = []string{"cmd", "localhost:8080", tracingFlag, "test-tracing"}
 
 	config := Config{
 		TracingName:  "test-tracing",
