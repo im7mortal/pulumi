@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
 	"github.com/spf13/pflag"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -22,6 +26,8 @@ const (
 	engineAddrField          = "EngineAddr"
 	pluginPathField          = "PluginPath"
 	healthCheckIntervalField = "HealthCheckInterval"
+
+	ENGINE_ADDR = "ENGINE_ADDR"
 )
 
 func findFlagValue(args []string, flag string) (bool, string) {
@@ -63,20 +69,26 @@ var tests = map[string]struct {
 }{
 	"simplest_run": {
 		config: Config{},
-		give:   []string{"localhost:"},
+		give:   []string{ENGINE_ADDR},
 		f:      standardFunc,
 	},
 	"run_with_tracing_plugin_path": {
 		config: Config{HealthcheckD: time.Minute},
-		give:   []string{"localhost:", pluginPath, tracingFlag, "localhost:8989"},
+		give:   []string{ENGINE_ADDR, pluginPath, tracingFlag, "localhost:8989"},
 		f:      standardFunc,
 	},
 	"engine_stopped_healtcheck_shutdown": {
 		config:           Config{HealthcheckD: 500 * time.Millisecond},
-		give:             []string{"localhost:"},
+		give:             []string{ENGINE_ADDR},
 		f:                standardFunc,
 		timeOutBefore:    2 * time.Second,
 		checkHealthCheck: true,
+	},
+	"healtcheck_valid": {
+		config:        Config{HealthcheckD: 500 * time.Millisecond},
+		give:          []string{ENGINE_ADDR},
+		f:             standardFunc,
+		timeOutBefore: 10 * time.Second,
 	},
 }
 
@@ -131,9 +143,23 @@ func checkExitCode(t *testing.T, err error) {
 	}
 }
 
+func substituteArg(args []string, sub, val string) []string {
+	for i := range args {
+		if args[i] == sub {
+			args[i] = val
+		}
+	}
+	return args
+}
+
 func TestSubprocessExit1(t *testing.T) {
 	for testCaseId, testCase := range tests {
 		t.Run(fmt.Sprintf("Test Case %s", testCaseId), func(t *testing.T) {
+
+			engAddr, shutdownEngine := StartHealthCheckServer(t)
+			defer shutdownEngine()
+			substituteArg(testCase.give, ENGINE_ADDR, engAddr)
+
 			// Run the test in a subprocess
 			cmd := exec.Command(os.Args[0], append([]string{"-test.run=TestCmd"}, testCase.give...)...)
 			cmd.Env = append(os.Environ(), "TEST_CASE_ID="+testCaseId)
@@ -208,6 +234,9 @@ func TestSubprocessExit1(t *testing.T) {
 
 			// in case we're testing healthCheck scenarios
 			if testCase.timeOutBefore != 0 {
+				if testCase.checkHealthCheck {
+					shutdownEngine()
+				}
 				time.Sleep(testCase.timeOutBefore)
 				if testCase.checkHealthCheck {
 					assert.Error(t, serverDone.Err(), "the healthcheck had to be triggered in this scenario")
@@ -252,5 +281,53 @@ func TestCmd(t *testing.T) {
 	}
 
 	testCase.f(s)
+
+}
+
+// HealthCheckImpl
+
+// HealthServer implements the grpc_health_v1.HealthServer interface
+type HealthServer struct {
+	grpc_health_v1.UnimplementedHealthServer
+}
+
+// Check returns the health status of the server
+func (s *HealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
+	if req.Service == "" {
+		return &grpc_health_v1.HealthCheckResponse{
+			Status: grpc_health_v1.HealthCheckResponse_SERVING,
+		}, nil
+	}
+	return nil, status.Errorf(codes.NotFound, "unknown service: %s", req.Service)
+}
+
+// Watch is not implemented for this simple example
+func (s *HealthServer) Watch(req *grpc_health_v1.HealthCheckRequest, stream grpc_health_v1.Health_WatchServer) error {
+	return status.Errorf(codes.Unimplemented, "Watch is not implemented")
+}
+
+func StartHealthCheckServer(t *testing.T) (string, func()) {
+	// Create a new gRPC server
+	grpcServer := grpc.NewServer()
+
+	// Register the health service
+	grpc_health_v1.RegisterHealthServer(grpcServer, &HealthServer{})
+
+	// Listen on a TCP port
+	listener, err := net.Listen("tcp", "")
+	if err != nil {
+		t.Fatalf("Failed to listen: %v\n", err)
+	}
+
+	// Start the server in a goroutine
+	go func() {
+		if err := grpcServer.Serve(listener); err != nil {
+			t.Fatalf("Failed to serve: %v\n", err)
+		}
+	}()
+
+	return listener.Addr().String(), func() {
+		grpcServer.GracefulStop()
+	}
 
 }
