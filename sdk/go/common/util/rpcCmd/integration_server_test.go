@@ -9,7 +9,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
+	"io/ioutil"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
@@ -27,7 +29,8 @@ const (
 	pluginPathField          = "PluginPath"
 	healthCheckIntervalField = "HealthCheckInterval"
 
-	ENGINE_ADDR = "ENGINE_ADDR"
+	ENGINE_ADDR  = "ENGINE_ADDR"
+	TRACING_ADDR = "TRACING_ADDR"
 )
 
 func findFlagValue(args []string, flag string) (bool, string) {
@@ -66,6 +69,8 @@ var tests = map[string]struct {
 
 	timeOutBefore    time.Duration
 	checkHealthCheck bool
+
+	tracingRun bool
 }{
 	"simplest_run": {
 		config: Config{},
@@ -74,8 +79,14 @@ var tests = map[string]struct {
 	},
 	"run_with_tracing_plugin_path": {
 		config: Config{HealthcheckD: time.Minute},
-		give:   []string{ENGINE_ADDR, pluginPath, tracingFlag, "localhost:8989"},
+		give:   []string{ENGINE_ADDR, pluginPath, tracingFlag, TRACING_ADDR},
 		f:      standardFunc,
+	},
+	"ensure_tracing": {
+		config:     Config{HealthcheckD: time.Minute},
+		give:       []string{ENGINE_ADDR, tracingFlag, TRACING_ADDR},
+		f:          standardFunc,
+		tracingRun: true,
 	},
 	"engine_stopped_healtcheck_shutdown": {
 		config:           Config{HealthcheckD: 500 * time.Millisecond},
@@ -160,6 +171,21 @@ func TestSubprocessExit1(t *testing.T) {
 			defer shutdownEngine()
 			substituteArg(testCase.give, ENGINE_ADDR, engAddr)
 
+			tracingAddr, shutdownTracingAddr, tracingChan := StartMockTracingServer(t)
+			defer shutdownTracingAddr()
+			substituteArg(testCase.give, TRACING_ADDR, fmt.Sprintf("http://%s", tracingAddr))
+
+			println(tracingAddr)
+			//time.Sleep(time.Hour)
+
+			go func() {
+
+				for {
+					fmt.Println("TRACING" + <-tracingChan)
+				}
+
+			}()
+
 			// Run the test in a subprocess
 			cmd := exec.Command(os.Args[0], append([]string{"-test.run=TestCmd"}, testCase.give...)...)
 			cmd.Env = append(os.Environ(), "TEST_CASE_ID="+testCaseId)
@@ -219,6 +245,13 @@ func TestSubprocessExit1(t *testing.T) {
 
 			client := pingpb.NewPingServiceClient(conn)
 			RequestTheServer(t, client, "Ping", "Pong")
+
+			if testCase.tracingRun {
+				for i := 0; i < 20; i++ {
+					time.Sleep(time.Second)
+					RequestTheServer(t, client, "Ping", "Pong")
+				}
+			}
 
 			if set, val := findFlagValue(testCase.give, tracingFlag); set {
 				RequestTheServer(t, client, tracingFlag, val)
@@ -330,4 +363,54 @@ func StartHealthCheckServer(t *testing.T) (string, func()) {
 		grpcServer.GracefulStop()
 	}
 
+}
+
+// Tracing server impl
+
+func StartMockTracingServer(t *testing.T) (string, func(), chan string) {
+	requestChan := make(chan string, 100) // Channel to capture request data
+
+	// Create a custom HTTP server
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Println("lol from server")
+			body, err := ioutil.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "could not read body", http.StatusInternalServerError)
+				return
+			}
+			defer r.Body.Close()
+
+			// Send the trace data to the channel
+			requestChan <- string(body)
+
+			// Respond with OK
+			w.WriteHeader(http.StatusOK)
+		}),
+	}
+
+	// Create a listener on a random available port
+	listener, err := net.Listen("tcp", "localhost:0") // 0 means assign a random port
+	if err != nil {
+		t.Fatalf("Failed to start mock tracing server: %v", err)
+	}
+
+	// Get the address of the server
+	serverAddr := listener.Addr().String()
+
+	// Start the server in a goroutine
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			t.Fatalf("Server error: %v", err)
+		}
+	}()
+
+	// Define a shutdown function to gracefully stop the server
+	shutdownFunc := func() {
+		if err := server.Close(); err != nil {
+			t.Fatalf("Failed to shut down server: %v", err)
+		}
+	}
+
+	return serverAddr, shutdownFunc, requestChan
 }
