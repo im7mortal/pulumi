@@ -46,7 +46,7 @@ var tests = map[string]struct {
 			s.Run(func(server *grpc.Server) error {
 				pingpb.RegisterPingServiceServer(server, &PingServer{s: s})
 				return nil
-			}, func() {})
+			})
 		},
 	},
 	"run_with_tracing_plugin_path": {
@@ -56,7 +56,7 @@ var tests = map[string]struct {
 			s.Run(func(server *grpc.Server) error {
 				pingpb.RegisterPingServiceServer(server, &PingServer{s: s})
 				return nil
-			}, func() {})
+			})
 		},
 	},
 }
