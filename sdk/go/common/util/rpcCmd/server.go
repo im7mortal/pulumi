@@ -124,7 +124,7 @@ func (s *Server) Run(iFunc InitFunc) {
 		}
 	}()
 
-	if s.config.TracingName != "" {
+	if s.tracing != "" {
 		// TracingName and RootSpanName are required if tracing is enabled.
 		if s.config.TracingName == "" || s.config.RootSpanName == "" {
 			err = errW(fmt.Errorf("missing required tracing configuration: TracingName or RootSpanName. " +
