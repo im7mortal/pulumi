@@ -2,7 +2,6 @@ package rpcCmd
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
@@ -17,6 +16,23 @@ import (
 	"google.golang.org/grpc"
 )
 
+const (
+	tracingFlag              = "--tracing"
+	engineAddrField          = "EngineAddr"
+	pluginPathField          = "PluginPath"
+	healthCheckIntervalField = "HealthCheckInterval"
+)
+
+func findFlagValue(args []string, flag string) (bool, string) {
+	// Iterate over the args slice to find the flag
+	for i, arg := range args {
+		if arg == flag {
+			return true, args[i+1] // it will panic if test input is invalid
+		}
+	}
+	return false, ""
+}
+
 var tests = map[string]struct {
 	config Config
 	give   []string
@@ -28,7 +44,17 @@ var tests = map[string]struct {
 		give:   []string{"localhost:"},
 		f: func(s *Server) {
 			s.Run(func(server *grpc.Server) error {
-				pingpb.RegisterPingServiceServer(server, &PingServer{})
+				pingpb.RegisterPingServiceServer(server, &PingServer{s: s})
+				return nil
+			}, func() {})
+		},
+	},
+	"tracing": {
+		config: Config{},
+		give:   []string{"localhost:", tracingFlag, "localhost:8989"},
+		f: func(s *Server) {
+			s.Run(func(server *grpc.Server) error {
+				pingpb.RegisterPingServiceServer(server, &PingServer{s: s})
 				return nil
 			}, func() {})
 		},
@@ -38,73 +64,41 @@ var tests = map[string]struct {
 // PingServer implements the PingService.
 type PingServer struct {
 	pingpb.UnimplementedPingServiceServer
+
+	s *Server
 }
 
 // Ping method returns a "Pong" response.
 func (s *PingServer) Ping(ctx context.Context, req *pingpb.PingRequest) (*pingpb.PingResponse, error) {
-
-	return &pingpb.PingResponse{Reply: "Pong"}, nil
+	var msg string
+	switch req.Message {
+	case "Ping":
+		msg = "Pong"
+	case tracingFlag:
+		msg = s.s.GetTracing()
+	case engineAddrField:
+		msg = s.s.GetEngineAddress()
+	case pluginPathField:
+		msg = s.s.GetPluginPath()
+	case healthCheckIntervalField:
+		msg = s.s.getHealthcheckD().String()
+	}
+	return &pingpb.PingResponse{Reply: msg}, nil
 }
 
-func TestIntegration(t *testing.T) {
-
-	s, err := NewServer(Config{})
-
-	assert.NoError(t, err)
-
-	// record buffer to find if it writes port correctly
-	originalStdout := os.Stdout // Save original stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w // Redirect stdout
-
-	finished := make(chan struct{})
-	go func() {
-		s.Run(func(server *grpc.Server) error {
-			pingpb.RegisterPingServiceServer(server, &PingServer{})
-			return nil
-		}, func() {})
-		close(finished)
-	}()
-	// give the server time to start and write port to the stdout
-	time.Sleep(time.Second)
-
-	// server should write port to stdout for 1 second
-	w.Close()
-	os.Stdout = originalStdout
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
-	fmt.Print(buf.String())
-
-	// look that port was printed to the stdout
-	assert.Contains(t, buf.String(), fmt.Sprintf("%d", s.handle.Port), "Expected port information in stdout")
-
-	// Connect to the gRPC server
-	conn, err := grpc.Dial(fmt.Sprintf("localhost:%d", s.handle.Port), grpc.WithInsecure())
-	assert.NoError(t, err)
-	defer conn.Close()
-
-	client := pingpb.NewPingServiceClient(conn)
+func RequestTheServer(t *testing.T, client pingpb.PingServiceClient, requested, expected string) {
 
 	// Send a Ping request
-	req := &pingpb.PingRequest{Message: "Ping"}
+	req := &pingpb.PingRequest{Message: requested}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	resp, err := client.Ping(ctx, req)
-	if err != nil {
-		t.Fatalf("Error while calling Ping: %v", err)
-	}
+	assert.NoError(t, err)
 
 	// Assert the response
-	assert.Equal(t, "Pong", resp.Reply, "Expected Pong response")
-
-	close(s.cancelChannel)
-
-	select {
-	case <-finished:
-	case <-time.After(time.Second):
-		t.Errorf("The server supposed to shutdown immediately after cancel signal but after 1 second it's still not finished")
-	}
+	assert.Equal(t, expected, resp.Reply, fmt.Sprintf("for requested %s expected %s, got %s", requested,
+		expected, resp.Reply))
 
 }
 
@@ -131,6 +125,7 @@ func TestSubprocessExit1(t *testing.T) {
 				// Wait for the subprocess to finish
 				err = cmd.Wait()
 				if err != nil {
+					time.Sleep(time.Second)
 					t.Fatalf("Subprocess finished with error: %v", err)
 				}
 				close(serverDone)
@@ -167,18 +162,11 @@ func TestSubprocessExit1(t *testing.T) {
 			defer conn.Close()
 
 			client := pingpb.NewPingServiceClient(conn)
+			RequestTheServer(t, client, "Ping", "Pong")
 
-			// Send a Ping request
-			req := &pingpb.PingRequest{Message: "Ping"}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-
-			resp, err := client.Ping(ctx, req)
-			assert.NoError(t, err)
-
-			// Assert the response
-			assert.Equal(t, "Pong", resp.Reply, "Expected Pong response")
-
+			if set, val := findFlagValue(testCase.give, tracingFlag); set {
+				RequestTheServer(t, client, tracingFlag, val)
+			}
 			// Simulate sending the os.Interrupt signal to the subprocess
 			err = cmd.Process.Signal(os.Interrupt)
 			if err != nil {
