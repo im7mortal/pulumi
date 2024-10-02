@@ -20,6 +20,8 @@ type Server struct {
 	// If a Flag is provided in the config, that one is used, but with rpcCmd flags registered as well.
 	Flag *pflag.FlagSet
 
+	FinishFunc func()
+
 	// tracing is a Zipkin-compatible tracing endpoint.
 	tracing string
 
@@ -106,16 +108,17 @@ func (s *Server) getHealthcheckD() time.Duration {
 
 // InitFunc defines the type of function passed to rpcutil.ServeWithOptions.
 type InitFunc func(*grpc.Server) error
-type FinishFunc func()
 
 // Run executes the RPC command.
-func (s *Server) Run(iFunc InitFunc, fFunc FinishFunc) {
+func (s *Server) Run(iFunc InitFunc) {
 	var err error
 
 	// Ensure the finish function is executed.
 	// Do not intercept panic; this runs as a separate command so the panic will be shown.
 	defer func() {
-		fFunc()
+		if s.FinishFunc != nil {
+			s.FinishFunc()
+		}
 		if err != nil {
 			cmdutil.Exit(err)
 		}
