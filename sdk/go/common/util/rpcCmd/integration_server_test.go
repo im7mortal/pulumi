@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,6 +93,12 @@ var tests = map[string]struct {
 			TracingName: tracingName, RootSpanName: rootSpanName},
 		give: []string{ENGINE_ADDR, tracingFlag, TRACING_ADDR},
 		f:    standardFunc,
+	},
+	"ensure_tracing_warning": {
+		config:         Config{HealthcheckD: time.Minute},
+		give:           []string{ENGINE_ADDR, tracingFlag, TRACING_ADDR},
+		f:              standardFunc,
+		tracingWarning: "Tracing disabled.",
 	},
 	"ensure_tracing_override": {
 		config: Config{HealthcheckD: time.Minute,
@@ -181,7 +188,7 @@ func substituteArg(args []string, sub, val string) []string {
 	return args
 }
 
-func TestSubprocessExit1(t *testing.T) {
+func TestSubprocess(t *testing.T) {
 	for testCaseId, testCase := range tests {
 		t.Run(fmt.Sprintf("Test Case %s", testCaseId), func(t *testing.T) {
 
@@ -199,6 +206,11 @@ func TestSubprocessExit1(t *testing.T) {
 
 			// Capture stdout dynamically
 			stdoutPipe, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatalf("Failed to get stdout pipe: %v", err)
+			}
+			// Capture stderr dynamically
+			stderrPipe, err := cmd.StderrPipe()
 			if err != nil {
 				t.Fatalf("Failed to get stdout pipe: %v", err)
 			}
@@ -228,6 +240,19 @@ func TestSubprocessExit1(t *testing.T) {
 					line := scanner.Text()
 					fmt.Printf("%s\n", line)
 					portC <- line
+				}
+			}()
+
+			tracingWarningCh := make(chan struct{})
+			go func() {
+				scanner := bufio.NewScanner(stderrPipe)
+				for scanner.Scan() {
+					line := scanner.Text()
+					if testCase.tracingWarning != "" {
+						if strings.Contains(line, testCase.tracingWarning) {
+							close(tracingWarningCh)
+						}
+					}
 				}
 			}()
 
@@ -274,8 +299,14 @@ func TestSubprocessExit1(t *testing.T) {
 					case <-time.After(2 * time.Second):
 						t.Fatalf("Didn't get expected tracing")
 					}
+				} else {
+					select {
+					case <-tracingWarningCh:
+						// continue tracing misconfiguration MUST NOT interrupt workflow
+					case <-time.After(2 * time.Second):
+						t.Fatalf("Didn't get expected tracing warning")
+					}
 				}
-
 			}
 
 			if set, val := findPluginPathValue(testCase.give); set {
