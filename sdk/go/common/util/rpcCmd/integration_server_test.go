@@ -39,7 +39,7 @@ var tests = map[string]struct {
 
 	f func(s *Server)
 }{
-	"normal_run": {
+	"simplest_run": {
 		config: Config{},
 		give:   []string{"localhost:"},
 		f: func(s *Server) {
@@ -49,9 +49,9 @@ var tests = map[string]struct {
 			}, func() {})
 		},
 	},
-	"tracing": {
-		config: Config{},
-		give:   []string{"localhost:", tracingFlag, "localhost:8989"},
+	"run_with_tracing_plugin_path": {
+		config: Config{HealthcheckD: time.Second},
+		give:   []string{"localhost:", pluginPath, tracingFlag, "localhost:8989"},
 		f: func(s *Server) {
 			s.Run(func(server *grpc.Server) error {
 				pingpb.RegisterPingServiceServer(server, &PingServer{s: s})
@@ -167,6 +167,11 @@ func TestSubprocessExit1(t *testing.T) {
 			if set, val := findFlagValue(testCase.give, tracingFlag); set {
 				RequestTheServer(t, client, tracingFlag, val)
 			}
+
+			if testCase.config.HealthcheckD != 0 {
+				RequestTheServer(t, client, healthCheckIntervalField, testCase.config.HealthcheckD.String())
+			}
+
 			// Simulate sending the os.Interrupt signal to the subprocess
 			err = cmd.Process.Signal(os.Interrupt)
 			if err != nil {
