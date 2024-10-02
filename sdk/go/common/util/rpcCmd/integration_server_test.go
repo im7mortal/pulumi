@@ -9,7 +9,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -70,7 +70,7 @@ var tests = map[string]struct {
 	timeOutBefore    time.Duration
 	checkHealthCheck bool
 
-	tracingRun bool
+	tracingWarning string
 }{
 	"simplest_run": {
 		config: Config{},
@@ -78,15 +78,16 @@ var tests = map[string]struct {
 		f:      standardFunc,
 	},
 	"run_with_tracing_plugin_path": {
-		config: Config{HealthcheckD: time.Minute},
-		give:   []string{ENGINE_ADDR, pluginPath, tracingFlag, TRACING_ADDR},
-		f:      standardFunc,
+		config: Config{HealthcheckD: time.Minute,
+			TracingName: tracingName, RootSpanName: rootSpanName},
+		give: []string{ENGINE_ADDR, pluginPath, tracingFlag, TRACING_ADDR},
+		f:    standardFunc,
 	},
 	"ensure_tracing": {
-		config:     Config{HealthcheckD: time.Minute},
-		give:       []string{ENGINE_ADDR, tracingFlag, TRACING_ADDR},
-		f:          standardFunc,
-		tracingRun: true,
+		config: Config{HealthcheckD: time.Minute,
+			TracingName: tracingName, RootSpanName: rootSpanName},
+		give: []string{ENGINE_ADDR, tracingFlag, TRACING_ADDR},
+		f:    standardFunc,
 	},
 	"engine_stopped_healtcheck_shutdown": {
 		config:           Config{HealthcheckD: 500 * time.Millisecond},
@@ -175,17 +176,6 @@ func TestSubprocessExit1(t *testing.T) {
 			defer shutdownTracingAddr()
 			substituteArg(testCase.give, TRACING_ADDR, fmt.Sprintf("http://%s", tracingAddr))
 
-			println(tracingAddr)
-			//time.Sleep(time.Hour)
-
-			go func() {
-
-				for {
-					fmt.Println("TRACING" + <-tracingChan)
-				}
-
-			}()
-
 			// Run the test in a subprocess
 			cmd := exec.Command(os.Args[0], append([]string{"-test.run=TestCmd"}, testCase.give...)...)
 			cmd.Env = append(os.Environ(), "TEST_CASE_ID="+testCaseId)
@@ -246,15 +236,21 @@ func TestSubprocessExit1(t *testing.T) {
 			client := pingpb.NewPingServiceClient(conn)
 			RequestTheServer(t, client, "Ping", "Pong")
 
-			if testCase.tracingRun {
-				for i := 0; i < 20; i++ {
-					time.Sleep(time.Second)
-					RequestTheServer(t, client, "Ping", "Pong")
-				}
-			}
-
 			if set, val := findFlagValue(testCase.give, tracingFlag); set {
 				RequestTheServer(t, client, tracingFlag, val)
+
+				// also check that mock tracing server actually get trace logs ONLY IF don't expect warning
+				if testCase.tracingWarning == "" {
+					select {
+					case traceString := <-tracingChan:
+						assert.Contains(t, traceString, tracingName)
+						// TODO figure out why rootSpanName is not there. I assume it requires more complicated mock server?
+						//assert.Contains(t, traceString, rootSpanName)
+					case <-time.After(2 * time.Second):
+						t.Fatalf("Didn't get expected tracing")
+					}
+				}
+
 			}
 
 			if set, val := findPluginPathValue(testCase.give); set {
@@ -366,25 +362,28 @@ func StartHealthCheckServer(t *testing.T) (string, func()) {
 }
 
 // Tracing server impl
-
 func StartMockTracingServer(t *testing.T) (string, func(), chan string) {
 	requestChan := make(chan string, 100) // Channel to capture request data
 
 	// Create a custom HTTP server
 	server := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Println("lol from server")
-			body, err := ioutil.ReadAll(r.Body)
+
+			// Read the body of the request
+			body, err := io.ReadAll(r.Body)
 			if err != nil {
-				http.Error(w, "could not read body", http.StatusInternalServerError)
-				return
+				t.Fatalf("could not read body")
 			}
 			defer r.Body.Close()
 
-			// Send the trace data to the channel
-			requestChan <- string(body)
+			// TODO Try to decode the body as Thrift (Jaeger Span)
+			//decodedSpan, err := decodeThriftSpan(body)
+			//if err != nil {
+			//	fmt.Printf("Failed to decode Thrift data: %v\n", err)
+			//}
 
-			// Respond with OK
+			// Send the trace data to the channel for further processing in tests
+			requestChan <- string(body)
 			w.WriteHeader(http.StatusOK)
 		}),
 	}
@@ -414,3 +413,29 @@ func StartMockTracingServer(t *testing.T) (string, func(), chan string) {
 
 	return serverAddr, shutdownFunc, requestChan
 }
+
+// TODO I couldn't make following code to work yet
+// decodeThriftSpan attempts to decode the given Thrift binary data into a Jaeger span
+//func decodeThriftSpan(thriftData []byte) (*jaeger.Batch, error) {
+//	// Create a Thrift transport and protocol for decoding
+//	transport := thrift.NewTMemoryBufferLen(1024)
+//	_, err := transport.Write(thriftData)
+//	if err != nil {
+//		return nil, fmt.Errorf("error writing to buffer: %w", err)
+//	}
+//	a := thrift.THeaderProtocolBinary
+//	protocol := thrift.NewTBinaryProtocolConf(transport, &thrift.TConfiguration{
+//		THeaderProtocolID: &a,
+//	})
+//
+//	// Initialize a Jaeger span (as defined in jaeger.thrift)
+//	span := jaeger.NewBatch()
+//
+//	// Use context.Background() to provide the required context
+//	err = span.Read(context.Background(), protocol)
+//	if err != nil {
+//		return nil, fmt.Errorf("error decoding Thrift data: %w", err)
+//	}
+//
+//	return span, nil
+//}
